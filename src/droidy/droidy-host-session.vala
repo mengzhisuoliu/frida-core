@@ -251,12 +251,38 @@ namespace Frida {
 		}
 
 		public async HostProcessInfo[] enumerate_processes (Cancellable? cancellable) throws Error, IOError {
-			var server = yield get_remote_server (cancellable);
-			try {
-				return yield server.session.enumerate_processes (cancellable);
-			} catch (GLib.Error e) {
-				throw_dbus_error (e);
+			var server = yield try_get_remote_server (cancellable);
+			if (server != null && server.flavor == REGULAR) {
+				try {
+					return yield server.session.enumerate_processes (cancellable);
+				} catch (GLib.Error e) {
+					throw_dbus_error (e);
+				}
 			}
+
+			string raw_output = yield Droidy.ShellCommand.run ("ps -A -o PID:1=,PPID:1=,ARGS:1= -wn",
+				device_details.serial, cancellable);
+
+			var result = new HostProcessInfo[0];
+			var no_icon = ImageData.empty ();
+
+			foreach (string line in raw_output.split ("\n")) {
+				string[] tokens = line.split (" ", 3);
+				if (tokens.length != 3)
+					continue;
+
+				uint pid = uint.parse (tokens[0]);
+				uint parent_pid = uint.parse (tokens[1]);
+				unowned string cmdline = tokens[2];
+
+				bool is_kernel_process = pid == 0 || pid == 2 || parent_pid == 2;
+				if (is_kernel_process)
+					continue;
+
+				result += HostProcessInfo (pid, cmdline, no_icon, no_icon);
+			}
+
+			return result;
 		}
 
 		public async void enable_spawn_gating (Cancellable? cancellable) throws Error, IOError {

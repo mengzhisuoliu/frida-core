@@ -1,10 +1,10 @@
 namespace Frida.Droidy {
 	public class DeviceTracker : Object {
-		public signal void device_attached (string serial, string name);
+		public signal void device_attached (DeviceDetails details);
 		public signal void device_detached (string serial);
 
 		private Client? client;
-		private Gee.HashMap<string, DeviceInfo> devices = new Gee.HashMap<string, DeviceInfo> ();
+		private Gee.HashMap<string, DeviceEntry> devices = new Gee.HashMap<string, DeviceEntry> ();
 		private Cancellable io_cancellable = new Cancellable ();
 
 		public async void open (Cancellable? cancellable = null) throws Error, IOError {
@@ -43,8 +43,8 @@ namespace Frida.Droidy {
 		}
 
 		private async void update_devices (string devices_encoded, Cancellable? cancellable) throws IOError {
-			var detached = new Gee.ArrayList<DeviceInfo> ();
-			var attached = new Gee.ArrayList<DeviceInfo> ();
+			var detached = new Gee.ArrayList<DeviceEntry> ();
+			var attached = new Gee.ArrayList<DeviceEntry> ();
 
 			var current = new Gee.HashMap<string, string?> ();
 			foreach (var line in devices_encoded.split ("\n")) {
@@ -72,50 +72,49 @@ namespace Frida.Droidy {
 
 				current[serial] = name;
 			}
-			foreach (var entry in devices.entries) {
-				var serial = entry.key;
-				var info = entry.value;
+			foreach (var e in devices.entries) {
+				var serial = e.key;
 				if (!current.has_key (serial))
-					detached.add (info);
+					detached.add (e.value);
 			}
 			foreach (var entry in current.entries) {
 				unowned string serial = entry.key;
 				if (!devices.has_key (serial))
-					attached.add (new DeviceInfo (serial, entry.value));
+					attached.add (new DeviceEntry (serial, entry.value));
 			}
 
-			foreach (var info in detached)
-				devices.unset (info.serial);
-			foreach (var info in attached)
-				devices[info.serial] = info;
+			foreach (var entry in detached)
+				devices.unset (entry.serial);
+			foreach (var entry in attached)
+				devices[entry.serial] = entry;
 
-			foreach (var info in detached) {
-				if (info.announced)
-					device_detached (info.serial);
+			foreach (var entry in detached) {
+				if (entry.announced)
+					device_detached (entry.serial);
 			}
-			foreach (var info in attached)
-				yield announce_device (info, cancellable);
+			foreach (var entry in attached)
+				yield announce_device (entry, cancellable);
 		}
 
-		private async void announce_device (DeviceInfo info, Cancellable? cancellable) throws IOError {
-			var serial = info.serial;
+		private async void announce_device (DeviceEntry entry, Cancellable? cancellable) throws IOError {
+			var serial = entry.serial;
 
 			uint port = 0;
 			serial.scanf ("emulator-%u", out port);
 			if (port != 0) {
-				info.name = "Android Emulator %u".printf (port);
-			} else if (info.name == null) {
+				entry.name = "Android Emulator %u".printf (port);
+			} else if (entry.name == null) {
 				try {
-					info.name = yield detect_name (info.serial, cancellable);
+					entry.name = yield detect_name (entry.serial, cancellable);
 				} catch (Error e) {
-					info.name = "Android Device";
+					entry.name = "Android Device";
 				}
 			}
 
-			var still_attached = devices.has_key (info.serial);
+			var still_attached = devices.has_key (entry.serial);
 			if (still_attached) {
-				info.announced = true;
-				device_attached (info.serial, info.name);
+				entry.announced = true;
+				device_attached (new DeviceDetails (entry.serial, entry.name));
 			}
 		}
 
@@ -124,7 +123,7 @@ namespace Frida.Droidy {
 			return output.chomp ();
 		}
 
-		private class DeviceInfo {
+		private class DeviceEntry {
 			public string serial {
 				get;
 				private set;
@@ -140,10 +139,26 @@ namespace Frida.Droidy {
 				set;
 			}
 
-			public DeviceInfo (string serial, string? name) {
+			public DeviceEntry (string serial, string? name) {
 				this.serial = serial;
 				this.name = name;
 			}
+		}
+	}
+
+	public class DeviceDetails : Object {
+		public string serial {
+			get;
+			construct;
+		}
+
+		public string name {
+			get;
+			construct;
+		}
+
+		public DeviceDetails (string serial, string name) {
+			Object (serial: serial, name: name);
 		}
 	}
 
@@ -188,6 +203,7 @@ namespace Frida.Droidy {
 	}
 
 	public class Client : Object, AsyncInitable {
+		public signal void closed ();
 		public signal void message (string payload);
 
 		public SocketConnection? connection {
@@ -398,6 +414,8 @@ namespace Frida.Droidy {
 			} catch (GLib.Error e) {
 				throw new Error.TRANSPORT ("Unable to read string: %s", e.message);
 			}
+			if (bytes_read == 0)
+				closed ();
 			if (bytes_read != length)
 				throw new Error.TRANSPORT ("Unable to read string");
 			buf[length] = '\0';

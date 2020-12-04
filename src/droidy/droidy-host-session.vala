@@ -233,12 +233,40 @@ namespace Frida {
 		}
 
 		public async HostApplicationInfo get_frontmost_application (Cancellable? cancellable) throws Error, IOError {
-			var server = yield get_remote_server (cancellable);
-			try {
-				return yield server.session.get_frontmost_application (cancellable);
-			} catch (GLib.Error e) {
-				throw_dbus_error (e);
+			var server = yield try_get_remote_server (cancellable);
+			if (server != null && server.flavor == REGULAR) {
+				try {
+					return yield server.session.get_frontmost_application (cancellable);
+				} catch (GLib.Error e) {
+					throw_dbus_error (e);
+				}
 			}
+
+			unowned string serial = device_details.serial;
+
+			string raw_activities = yield Droidy.ShellCommand.run ("dumpsys activity activities", serial, cancellable);
+			MatchInfo info;
+			if (!/^  ResumedActivity: ActivityRecord{\w+ \w+ (.+)\//m.match (raw_activities, 0, out info))
+				return HostApplicationInfo.empty ();
+			string package = info.fetch (1);
+
+			// TODO: Detect launcher generically.
+			if (package == "com.google.android.apps.nexuslauncher")
+				return HostApplicationInfo.empty ();
+
+			// TODO: Fetch app name.
+			unowned string name = package;
+
+			/*
+			 * XXX: This will fail if the app has changed its cmdline or has multiple processes
+			 *      with the same name.
+			 */
+			string raw_pid = yield Droidy.ShellCommand.run ("pidof -s '%s'".printf (package), serial, cancellable);
+			uint pid = uint.parse (raw_pid);
+
+			var no_icon = ImageData.empty ();
+
+			return HostApplicationInfo (package, name, pid, no_icon, no_icon);
 		}
 
 		public async HostApplicationInfo[] enumerate_applications (Cancellable? cancellable) throws Error, IOError {

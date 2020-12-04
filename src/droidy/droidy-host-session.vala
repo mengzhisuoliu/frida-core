@@ -242,12 +242,79 @@ namespace Frida {
 		}
 
 		public async HostApplicationInfo[] enumerate_applications (Cancellable? cancellable) throws Error, IOError {
-			var server = yield get_remote_server (cancellable);
-			try {
-				return yield server.session.enumerate_applications (cancellable);
-			} catch (GLib.Error e) {
-				throw_dbus_error (e);
+			var server = yield try_get_remote_server (cancellable);
+			if (server != null && server.flavor == REGULAR) {
+				try {
+					return yield server.session.enumerate_applications (cancellable);
+				} catch (GLib.Error e) {
+					throw_dbus_error (e);
+				}
 			}
+
+			unowned string serial = device_details.serial;
+
+			string raw_apps = yield Droidy.ShellCommand.run ("pm list packages -U", serial, cancellable);
+			string raw_processes = yield Droidy.ShellCommand.run ("ps -A -o UID:1=,PID:1=,ARGS:1= -n", serial, cancellable);
+
+			var pids_by_name = new Gee.HashMultiMap<string, uint> ();
+			var pids_by_uid = new Gee.HashMultiMap<uint, uint> ();
+			foreach (string line in raw_processes.split ("\n")) {
+				string[] tokens = line.split (" ", 3);
+				if (tokens.length != 3)
+					continue;
+
+				uint uid = uint.parse (tokens[0]);
+				uint pid = uint.parse (tokens[1]);
+				unowned string cmdline = tokens[2];
+
+				pids_by_name[cmdline] = pid;
+				pids_by_uid[uid] = pid;
+			}
+
+			var result = new HostApplicationInfo[0];
+			var no_icon = ImageData.empty ();
+
+			foreach (string line in raw_apps.chomp ().split ("\n")) {
+				string[] fields = line.split (" ");
+
+				string? package = null;
+				string? raw_uid = null;
+				foreach (unowned string field in fields) {
+					if (field.has_prefix ("package:"))
+						package = field[8:];
+					else if (field.has_prefix ("uid:"))
+						raw_uid = field[4:];
+				}
+				if (package == null || raw_uid == null)
+					continue;
+				uint uid = uint.parse (raw_uid);
+
+				// TODO: Fetch app name.
+				unowned string name = package;
+
+				uint pid = 0;
+				Gee.Collection<uint> pids = pids_by_uid[uid];
+				var iterator = pids_by_name[package].filter (p => pids.contains (p));
+				if (iterator.next ()) {
+					/*
+					 * XXX: This will fail if the app has changed its cmdline or has multiple processes
+					 *      with the same name.
+					 */
+					pid = iterator.get ();
+				}
+
+				result += HostApplicationInfo (package, name, pid, no_icon, no_icon);
+			}
+
+			if (server != null && server.flavor == GADGET) {
+				try {
+					foreach (var app in yield server.session.enumerate_applications (cancellable))
+						result += app;
+				} catch (GLib.Error e) {
+				}
+			}
+
+			return result;
 		}
 
 		public async HostProcessInfo[] enumerate_processes (Cancellable? cancellable) throws Error, IOError {

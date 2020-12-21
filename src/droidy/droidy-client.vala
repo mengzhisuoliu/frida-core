@@ -589,7 +589,7 @@ namespace Frida.Droidy {
 				this.handler = (owned) handler;
 			}
 
-			public void complete_with_result (Bytes result) {
+			public void complete_with_result (Bytes? result) {
 				if (handler == null)
 					return;
 				this.result = result;

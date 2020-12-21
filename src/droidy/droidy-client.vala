@@ -330,6 +330,7 @@ namespace Frida.Droidy {
 				Memory.copy (message_buf, length_str, index);
 				Memory.copy ((uint8 *) message_buf + index, message.get_data (), message_size);
 
+				/*
 				var m = new StringBuilder ();
 				var s = new StringBuilder ();
 				for (var i = 0; i != message_buf.length; i++) {
@@ -340,6 +341,7 @@ namespace Frida.Droidy {
 				}
 				//  printerr ("Sending: %s\n", m.str);
 				printerr ("Sending: %s\n", s.str);
+				*/
 
 				size_t bytes_written;
 				try {

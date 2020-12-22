@@ -157,7 +157,7 @@ namespace Frida {
 					client = yield Droidy.Client.open (cancellable);
 					yield client.request ("host:transport:" + device_details.serial, cancellable);
 					yield client.request_protocol_change (address, cancellable);
-					return client.connection;
+					return client.stream;
 				} catch (GLib.Error e) {
 					if (client != null)
 						client.close.begin ();

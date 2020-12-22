@@ -172,7 +172,7 @@ namespace Frida.Droidy {
 				yield client.request ("host:transport:" + device_serial, cancellable);
 				yield client.request_protocol_change ("shell:" + command, cancellable);
 
-				var input = client.connection.get_input_stream ();
+				var input = client.stream.get_input_stream ();
 				var buf = new uint8[CHUNK_SIZE];
 				var offset = 0;
 				while (true) {
@@ -202,16 +202,16 @@ namespace Frida.Droidy {
 		}
 	}
 
-	public class Client : Object, AsyncInitable {
+	public class Client : Object {
 		public signal void closed ();
 		public signal void message (string payload);
 
-		public SocketConnection? connection {
+		public IOStream stream {
 			get;
-			private set;
+			construct;
 		}
-		private InputStream? input;
-		private OutputStream? output;
+		private InputStream input;
+		private OutputStream output;
 		private Cancellable io_cancellable = new Cancellable ();
 
 		protected bool is_processing_messages;
@@ -229,37 +229,33 @@ namespace Frida.Droidy {
 		private const size_t MAX_DATA_SIZE = 65536;
 
 		public static async Client open (Cancellable? cancellable = null) throws Error, IOError {
-			var client = new Client ();
-
+			IOStream stream;
 			try {
-				yield client.init_async (Priority.DEFAULT, cancellable);
-			} catch (GLib.Error e) {
-				throw_api_error (e);
-			}
-
-			return client;
-		}
-
-		private async bool init_async (int io_priority, Cancellable? cancellable) throws Error, IOError {
-			var client = new SocketClient ();
-
-			try {
-				connection = yield client.connect_async (new NetworkAddress.loopback (ADB_SERVER_PORT), cancellable);
+				var client = new SocketClient ();
+				var connection = yield client.connect_async (new NetworkAddress.loopback (ADB_SERVER_PORT), cancellable);
 
 				Tcp.enable_nodelay (connection.socket);
 				IO.maximize_send_buffer_size (connection.socket);
 
-				input = connection.get_input_stream ();
-				output = connection.get_output_stream ();
-
-				is_processing_messages = true;
-
-				process_incoming_messages.begin ();
+				stream = connection;
 			} catch (GLib.Error e) {
 				throw new Error.NOT_SUPPORTED ("%s", e.message);
 			}
 
-			return true;
+			return new Client (stream);
+		}
+
+		public Client (IOStream stream) {
+			Object (stream: stream);
+		}
+
+		construct {
+			input = stream.get_input_stream ();
+			output = stream.get_output_stream ();
+
+			is_processing_messages = true;
+
+			process_incoming_messages.begin ();
 		}
 
 		public async void close (Cancellable? cancellable = null) throws IOError {
@@ -276,16 +272,11 @@ namespace Frida.Droidy {
 			}
 
 			try {
-				var conn = this.connection;
-				if (conn != null)
-					yield conn.close_async (Priority.DEFAULT, cancellable);
+				yield this.stream.close_async (Priority.DEFAULT, cancellable);
 			} catch (GLib.Error e) {
 				if (e is IOError.CANCELLED)
 					throw (IOError) e;
 			}
-			connection = null;
-			input = null;
-			output = null;
 		}
 
 		public static async void push (string device_serial, InputStream content, string remote_path, Cancellable? cancellable = null) throws Error, IOError {
@@ -294,8 +285,14 @@ namespace Frida.Droidy {
 
 			try {
 				var c = yield open (cancellable);
-				yield c.request ("host:transport:" + device_serial, cancellable);
-				yield c.request ("sync:", cancellable);
+				string local_address = "local:/Users/oleavr/foo";
+				string remote_address = "sync:";
+				yield c.request ("host-serial:" + device_serial + ":forward:" + local_address + ";" + remote_address, cancellable);
+				yield c.close ();
+				var connectable = new UnixSocketAddress ("/Users/oleavr/foo");
+				var client = new SocketClient ();
+				var connection = yield client.connect_async (connectable, cancellable);
+				c = new Client (connection);
 
 				var cmd_buf = new MemoryOutputStream.resizable ();
 				var cmd = new DataOutputStream (cmd_buf);
@@ -359,8 +356,8 @@ namespace Frida.Droidy {
 				cmd.put_string ("DONE");
 				cmd.put_uint64 (timestamp.to_unix ());
 
-				cmd.put_string ("QUIT");
-				cmd.put_uint32 (0);
+				//cmd.put_string ("QUIT");
+				//cmd.put_uint32 (0);
 
 				cmd_buf.close ();
 				timer.reset ();
@@ -498,6 +495,7 @@ namespace Frida.Droidy {
 							break;
 					}
 				} catch (Error e) {
+					printerr ("Oops: %s\n", e.message);
 					foreach (var pending_response in pending_responses)
 						pending_response.complete_with_error (e);
 					is_processing_messages = false;

@@ -211,7 +211,8 @@ namespace Frida.Droidy {
 
 			try {
 				yield client.request ("host:transport:" + device_serial, cancellable);
-				yield client.request ("sync:", cancellable);
+
+				var session = yield client.request_sync_session (cancellable);
 
 				var cmd_buf = new MemoryOutputStream.resizable ();
 				var cmd = new DataOutputStream (cmd_buf);
@@ -236,7 +237,7 @@ namespace Frida.Droidy {
 					cmd.write_bytes (chunk);
 
 					cmd_buf.close ();
-					yield client.write_subcommand_chunk (cmd_buf.steal_as_bytes (), cancellable);
+					yield session.send (cmd_buf.steal_as_bytes (), cancellable);
 
 					cmd_buf = new MemoryOutputStream.resizable ();
 					cmd = new DataOutputStream (cmd_buf);
@@ -246,13 +247,12 @@ namespace Frida.Droidy {
 				cmd.put_string ("DONE");
 				cmd.put_uint32 ((uint32) metadata.time_modified.to_unix ());
 
-				cmd.put_string ("QUIT");
-				cmd.put_uint32 (0);
-
 				cmd_buf.close ();
-				yield client.request_with_bytes (cmd_buf.steal_as_bytes (), SUBCOMMAND, cancellable);
+				yield session.finish (cmd_buf.steal_as_bytes (), cancellable);
 			} catch (GLib.Error e) {
 				throw new Error.TRANSPORT ("%s", e.message);
+			} finally {
+				client.close.begin (cancellable);
 			}
 		}
 	}
@@ -354,7 +354,7 @@ namespace Frida.Droidy {
 
 		public enum RequestType {
 			COMMAND,
-			SUBCOMMAND,
+			SYNC,
 			DATA,
 			PROTOCOL_CHANGE
 		}
@@ -424,6 +424,20 @@ namespace Frida.Droidy {
 			yield request_with_type (message, RequestType.PROTOCOL_CHANGE, cancellable);
 		}
 
+		public async SyncSession request_sync_session (Cancellable? cancellable = null) throws Error, IOError {
+			yield request ("sync:", cancellable);
+
+			var session = new SyncSession (this);
+
+			PendingResponse pending = null;
+			pending = new PendingResponse (RequestType.SYNC, () => {
+				session._end (pending.error);
+			});
+			pending_responses.offer_tail (pending);
+
+			return session;
+		}
+
 		private async string? request_with_type (string message, RequestType request_type, Cancellable? cancellable)
 				throws Error, IOError {
 			Bytes response_bytes = yield request_with_bytes (new Bytes (message.data), request_type, cancellable);
@@ -451,7 +465,7 @@ namespace Frida.Droidy {
 			try {
 				size_t bytes_written;
 				try {
-					if (request_type == SUBCOMMAND) {
+					if (request_type == SYNC) {
 						yield output.write_all_async (message.get_data (), Priority.DEFAULT, cancellable, out bytes_written);
 					} else {
 						var message_size = message.get_size ();
@@ -483,7 +497,7 @@ namespace Frida.Droidy {
 			return pending.result;
 		}
 
-		public async void write_subcommand_chunk (Bytes chunk, Cancellable? cancellable) throws Error, IOError {
+		internal async void write_subcommand_chunk (Bytes chunk, Cancellable? cancellable) throws Error, IOError {
 			try {
 				size_t bytes_written;
 				yield output.write_all_async (chunk.get_data (), Priority.DEFAULT, cancellable, out bytes_written);
@@ -515,7 +529,7 @@ namespace Frida.Droidy {
 										return;
 									}
 								} else {
-									var error_message = yield read_string ();
+									var error_message = yield read_string (pending.request_type);
 									pending.complete_with_error (
 										new Error.NOT_SUPPORTED (error_message));
 								}
@@ -545,9 +559,15 @@ namespace Frida.Droidy {
 			}
 		}
 
-		private async string read_string () throws Error {
-			var length_str = yield read_fixed_string (4);
-			var length = parse_length (length_str);
+		private async string read_string (RequestType type) throws Error {
+			size_t length;
+			if (type == SYNC) {
+				length = yield read_u32 ();
+			} else {
+				var length_str = yield read_fixed_string (4);
+				length = parse_length (length_str);
+			}
+
 			return yield read_fixed_string (length);
 		}
 
@@ -566,6 +586,22 @@ namespace Frida.Droidy {
 			buf[length] = '\0';
 			char * chars = buf;
 			return (string) chars;
+		}
+
+		private async uint32 read_u32 () throws Error {
+			uint32 result = 0;
+
+			unowned uint8[] buf = (uint8[]) &result;
+			size_t bytes_read;
+			try {
+				yield input.read_all_async (buf[0:sizeof (uint32)], Priority.DEFAULT, io_cancellable, out bytes_read);
+			} catch (GLib.Error e) {
+				throw new Error.TRANSPORT ("Unable to read: %s", e.message);
+			}
+			if (bytes_read != sizeof (uint32))
+				throw new Error.TRANSPORT ("Unable to read");
+
+			return result;
 		}
 
 		private async Bytes read_bytes () throws Error {
@@ -641,6 +677,44 @@ namespace Frida.Droidy {
 				handler ();
 				handler = null;
 			}
+		}
+	}
+
+	public class SyncSession : Object {
+		public Client client {
+			get;
+			construct;
+		}
+
+		private Promise<bool> io_request = new Promise<bool> ();
+
+		public SyncSession (Client client) {
+			Object (client: client);
+		}
+
+		public async void send (Bytes chunk, Cancellable? cancellable = null) throws Error, IOError {
+			var future = io_request.future;
+			if (future.ready) {
+				if (future.error != null)
+					throw (Error) future.error;
+				else
+					throw new Error.PROTOCOL ("Sync session terminated unexpectedly");
+			}
+
+			yield client.write_subcommand_chunk (chunk, cancellable);
+		}
+
+		public async void finish (Bytes chunk, Cancellable? cancellable = null) throws Error, IOError {
+			yield send (chunk, cancellable);
+
+			yield io_request.future.wait_async (cancellable);
+		}
+
+		internal void _end (GLib.Error? error) {
+			if (error == null)
+				io_request.resolve (true);
+			else
+				io_request.reject (error);
 		}
 	}
 }

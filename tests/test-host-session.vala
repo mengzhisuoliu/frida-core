@@ -2991,174 +2991,18 @@ namespace Frida.HostSessionTest {
 				return;
 			}
 
-			var debuggable_app = "oversecured.ovaa";
-
+			string device_serial = "8B3X1335R";
+			string debuggable_app = "oversecured.ovaa";
+			string gadget_path = "/Users/oleavr/Downloads/frida-gadget-14.2.6-android-arm64.so";
 			Cancellable? cancellable = null;
-			var device_serial = "8B3X1335R";
-			var local_path = "/Users/oleavr/Downloads/frida-gadget-14.2.6-android-arm64.so";
-			var so_path_shared = "/data/local/tmp/gadget.so";
-			var so_path_app = "/data/data/" + debuggable_app + "/gadget.so";
-			var config_path_shared = "/data/local/tmp/gadget.config";
-			var config_path_app = "/data/data/" + debuggable_app + "/gadget.config";
-			var unix_socket_path = "frida:" + debuggable_app;
 
 			try {
-				bool waiting = false;
-				uint target_pid = 0;
-				JDWP.BreakpointEvent? breakpoint_event = null;
+				var gadget_file = File.new_for_path (gadget_path);
+				InputStream gadget = yield gadget_file.read_async (Priority.DEFAULT, cancellable);
 
-				var file = File.new_for_path (local_path);
-				FileInfo info = yield file.query_info_async (FileAttribute.TIME_MODIFIED, FileQueryInfoFlags.NONE,
-					Priority.DEFAULT, cancellable);
-				var so_meta = new Frida.Droidy.FileMetadata ();
-				so_meta.mode = 0100755;
-				so_meta.time_modified = info.get_modification_date_time ();
+				var details = yield Frida.Droidy.Injector.inject (gadget, debuggable_app, device_serial, cancellable);
 
-				InputStream content = yield file.read_async (Priority.DEFAULT, cancellable);
-				var timer = new Timer ();
-				yield Frida.Droidy.FileSync.send (content, so_meta, so_path_shared, device_serial, cancellable);
-				printerr ("Transfer took %u ms\n", (uint) (timer.elapsed () * 1000.0));
-
-				var config = new Json.Builder ();
-				config
-					.begin_object ()
-						.set_member_name ("interaction")
-						.begin_object ()
-							.set_member_name ("type")
-							.add_string_value ("listen")
-							.set_member_name ("address")
-							.add_string_value ("unix:" + unix_socket_path)
-							.set_member_name ("on_load")
-							.add_string_value ("resume")
-						.end_object ()
-						.set_member_name ("teardown")
-						.add_string_value ("full")
-					.end_object ();
-				string raw_config = Json.to_string (config.get_root (), false);
-				var config_meta = new Frida.Droidy.FileMetadata ();
-				config_meta.mode = 0100644;
-				config_meta.time_modified = so_meta.time_modified;
-				yield Frida.Droidy.FileSync.send (new MemoryInputStream.from_data (raw_config.data), config_meta,
-					config_path_shared, device_serial, cancellable);
-
-				yield Frida.Droidy.ShellCommand.run (
-					"am set-debug-app -w --persistent '%s'".printf (debuggable_app), device_serial, cancellable
-				);
-
-				yield Frida.Droidy.ShellCommand.run (
-					"am force-stop '%s'".printf (debuggable_app), device_serial, cancellable
-				);
-
-				var tracker = new Frida.Droidy.JDWPTracker ();
-				yield tracker.open (device_serial, cancellable);
-
-				tracker.debugger_attached.connect (pid => {
-					printerr ("Debugger attached! PID=%u\n", pid);
-					target_pid = pid;
-					if (waiting)
-						client.callback ();
-				});
-
-				yield Frida.Droidy.ShellCommand.run (
-					"am start -D $(cmd package resolve-activity --brief '%s'| tail -n 1)".printf (debuggable_app),
-					device_serial, cancellable
-				);
-
-				if (target_pid == 0) {
-					waiting = true;
-					yield;
-					waiting = false;
-				}
-
-				yield tracker.close (cancellable);
-
-				var c = yield Frida.Droidy.Client.open (cancellable);
-				yield c.request ("host:transport:" + device_serial, cancellable);
-				yield c.request_protocol_change ("jdwp:%u".printf (target_pid), cancellable);
-
-				var jdwp = yield JDWP.Client.open (c.stream, cancellable);
-
-				var activity_class = yield jdwp.get_class_by_signature ("Landroid/app/Activity;", cancellable);
-				printerr ("android.app.Activity: %s\n", activity_class.to_string ());
-				var activity_methods = yield jdwp.get_methods (activity_class.ref_type.id, cancellable);
-				foreach (var method in activity_methods) {
-					if (method.name == "onCreate") {
-						printerr ("\t%s\n", method.to_string ());
-						var id = yield jdwp.set_event_request (BREAKPOINT, JDWP.SuspendPolicy.EVENT_THREAD,
-							new JDWP.EventModifier[] {
-								new JDWP.LocationOnlyModifier (activity_class.ref_type, method.id),
-							});
-						printerr ("\t\tAdded breakpoint with ID: %s\n", id.to_string ());
-					}
-				}
-
-				jdwp.events_received.connect (events => {
-					printerr ("Got events: %s\n", events.to_string ());
-					breakpoint_event = (JDWP.BreakpointEvent) events.items[0];
-					if (waiting)
-						client.callback ();
-				});
-
-				yield jdwp.resume (cancellable);
-
-				if (breakpoint_event == null) {
-					waiting = true;
-					yield;
-					waiting = false;
-				}
-
-				var runtime_class = yield jdwp.get_class_by_signature ("Ljava/lang/Runtime;", cancellable);
-				var runtime_methods = yield jdwp.get_methods (runtime_class.ref_type.id, cancellable);
-				var get_runtime_method = JDWP.MethodID (0);
-				var exec_method = JDWP.MethodID (0);
-				var load_method = JDWP.MethodID (0);
-				foreach (var method in runtime_methods) {
-					if (method.name == "getRuntime" && method.signature == "()Ljava/lang/Runtime;") {
-						get_runtime_method = method.id;
-					} else if (method.name == "exec" && method.signature == "(Ljava/lang/String;)Ljava/lang/Process;") {
-						exec_method = method.id;
-					} else if (method.name == "load" && method.signature == "(Ljava/lang/String;)V") {
-						load_method = method.id;
-					}
-				}
-				assert (get_runtime_method.handle != 0 && exec_method.handle != 0 && load_method.handle != 0);
-
-				var process_class = yield jdwp.get_class_by_signature ("Ljava/lang/Process;", cancellable);
-				var process_methods = yield jdwp.get_methods (process_class.ref_type.id, cancellable);
-				var wait_for_method = JDWP.MethodID (0);
-				foreach (var method in process_methods) {
-					if (method.name == "waitFor" && method.signature == "()I") {
-						wait_for_method = method.id;
-						break;
-					}
-				}
-				assert (wait_for_method.handle != 0);
-
-				var runtime = (JDWP.Object) yield jdwp.invoke_static_method (runtime_class.ref_type, breakpoint_event.thread,
-					get_runtime_method, {}, 0, cancellable);
-
-				var copy_commands = new string[] {
-					"cp %s %s".printf (so_path_shared, so_path_app),
-					"cp %s %s".printf (config_path_shared, config_path_app),
-				};
-				foreach (unowned string cmd in copy_commands) {
-					var str = yield jdwp.create_string (cmd, cancellable);
-
-					var process = (JDWP.Object) yield jdwp.invoke_instance_method (runtime.val, breakpoint_event.thread,
-						runtime_class.ref_type.id, exec_method, new JDWP.Value[] { str, }, 0, cancellable);
-
-					yield jdwp.invoke_instance_method (process.val, breakpoint_event.thread, process_class.ref_type.id,
-						wait_for_method, {}, 0, cancellable);
-				}
-
-				var gadget_path = yield jdwp.create_string (so_path_app, cancellable);
-
-				printerr ("Calling Runtime.load(\"%s\")\n", so_path_app);
-				var result = yield jdwp.invoke_instance_method (runtime.val, breakpoint_event.thread,
-					runtime_class.ref_type.id, load_method, new JDWP.Value[] {
-						gadget_path,
-					}, 0, cancellable);
-				printerr ("Runtime.load() result: %s\n", result.to_string ());
+				printerr ("inject() => %p\n", details);
 			} catch (GLib.Error e) {
 				printerr ("\nFAIL: %s\n\n", e.message);
 			}

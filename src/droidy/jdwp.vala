@@ -483,6 +483,8 @@ namespace Frida.JDWP {
 				int header_size = 11;
 				var raw_reply = new uint8[header_size];
 				yield input.read_all_async (raw_reply, Priority.DEFAULT, io_cancellable, out n);
+				if (n == 0)
+					throw new Error.TRANSPORT ("Connection closed unexpectedly");
 
 				uint32 reply_size = uint32.from_big_endian (*((uint32 *) raw_reply));
 				if (reply_size != raw_reply.length) {
@@ -493,6 +495,8 @@ namespace Frida.JDWP {
 
 					raw_reply.resize ((int) reply_size);
 					yield input.read_all_async (raw_reply[header_size:], Priority.DEFAULT, io_cancellable, out n);
+					if (n == 0)
+						throw new Error.TRANSPORT ("Connection closed unexpectedly");
 				}
 
 				return new PacketReader ((owned) raw_reply, id_sizes);

@@ -454,6 +454,14 @@ namespace Frida {
 		}
 
 		public async AgentSessionId attach_to (uint pid, Cancellable? cancellable) throws Error, IOError {
+			try {
+				return yield attach_in_realm (pid, NATIVE, cancellable);
+			} catch (GLib.Error e) {
+				throw_dbus_error (e);
+			}
+		}
+
+		public async AgentSessionId attach_in_realm (uint pid, Realm realm, Cancellable? cancellable) throws Error, IOError {
 			var server = yield get_remote_server (cancellable);
 			try {
 				return yield attach_via_remote (pid, server, cancellable);

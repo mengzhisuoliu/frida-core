@@ -2991,12 +2991,13 @@ namespace Frida.HostSessionTest {
 				return;
 			}
 
-			Cancellable? cancellable = null;
-			var device_serial = "99UAY1BUBQ";
-			var local_path = "/tmp/gadget.so";
-			var remote_path = "/data/local/tmp/gadget.so";
-
 			var debuggable_app = "oversecured.ovaa";
+
+			Cancellable? cancellable = null;
+			var device_serial = "8B3X1335R";
+			var local_path = "/Users/oleavr/Downloads/frida-gadget-14.2.6-android-arm64.so";
+			var shared_remote_path = "/data/local/tmp/gadget.so";
+			var app_remote_path = "/data/data/" + debuggable_app + "/gadget.so";
 
 			try {
 				bool waiting = false;
@@ -3012,7 +3013,7 @@ namespace Frida.HostSessionTest {
 
 				InputStream content = yield file.read_async (Priority.DEFAULT, cancellable);
 				var timer = new Timer ();
-				yield Frida.Droidy.FileSync.send (content, meta, remote_path, device_serial, cancellable);
+				yield Frida.Droidy.FileSync.send (content, meta, shared_remote_path, device_serial, cancellable);
 				printerr ("Transfer took %u ms\n", (uint) (timer.elapsed () * 1000.0));
 
 				yield Frida.Droidy.ShellCommand.run (
@@ -3085,22 +3086,49 @@ namespace Frida.HostSessionTest {
 				printerr ("java.lang.Runtime: %s\n", runtime_class.to_string ());
 				var runtime_methods = yield jdwp.get_methods (runtime_class.ref_type.id, cancellable);
 				var get_runtime_method = JDWP.MethodID (0);
+				var exec_method = JDWP.MethodID (0);
 				var load_method = JDWP.MethodID (0);
 				foreach (var method in runtime_methods) {
 					printerr ("\t%s\n", method.to_string ());
 					if (method.name == "getRuntime" && method.signature == "()Ljava/lang/Runtime;") {
 						get_runtime_method = method.id;
+					} else if (method.name == "exec" && method.signature == "(Ljava/lang/String;)Ljava/lang/Process;") {
+						exec_method = method.id;
 					} else if (method.name == "load" && method.signature == "(Ljava/lang/String;)V") {
 						load_method = method.id;
 					}
 				}
-				assert (get_runtime_method.handle != 0 && load_method.handle != 0);
+				assert (get_runtime_method.handle != 0 && exec_method.handle != 0 && load_method.handle != 0);
+
+				var process_class = yield jdwp.get_class_by_signature ("Ljava/lang/Process;", cancellable);
+				var process_methods = yield jdwp.get_methods (process_class.ref_type.id, cancellable);
+				var wait_for_method = JDWP.MethodID (0);
+				foreach (var method in process_methods) {
+					if (method.name == "waitFor" && method.signature == "()I") {
+						wait_for_method = method.id;
+						break;
+					}
+				}
+				assert (wait_for_method.handle != 0);
 
 				var runtime = (JDWP.Object) yield jdwp.invoke_static_method (runtime_class.ref_type, breakpoint_event.thread,
 					get_runtime_method, {}, 0, cancellable);
 
-				var gadget_path = yield jdwp.create_string ("/data/user/0/no.oleavr.helloandroid/gadget.so", cancellable);
+				var copy_command = yield jdwp.create_string ("cp %s %s".printf (shared_remote_path, app_remote_path), cancellable);
 
+				var process = (JDWP.Object) yield jdwp.invoke_instance_method (runtime.val, breakpoint_event.thread,
+					runtime_class.ref_type.id, exec_method, new JDWP.Value[] {
+						copy_command,
+					}, 0, cancellable);
+				printerr ("Runtime.exec() result: %s\n", process.to_string ());
+
+				yield jdwp.invoke_instance_method (process.val, breakpoint_event.thread, process_class.ref_type.id,
+					wait_for_method, {}, 0, cancellable);
+				printerr ("waitFor() completed\n");
+
+				var gadget_path = yield jdwp.create_string (app_remote_path, cancellable);
+
+				printerr ("Calling Runtime.load(\"%s\")\n", app_remote_path);
 				var result = yield jdwp.invoke_instance_method (runtime.val, breakpoint_event.thread,
 					runtime_class.ref_type.id, load_method, new JDWP.Value[] {
 						gadget_path,

@@ -184,6 +184,8 @@ namespace Frida {
 			construct;
 		}
 
+		private Gee.HashMap<uint, Droidy.Injector.GadgetDetails> gadgets =
+			new Gee.HashMap<uint, Droidy.Injector.GadgetDetails> ();
 		private Gee.HashMap<AgentSessionId?, AgentEntry> agent_entries =
 			new Gee.HashMap<AgentSessionId?, AgentEntry> (AgentSessionId.hash, AgentSessionId.equal);
 
@@ -417,12 +419,54 @@ namespace Frida {
 		}
 
 		public async uint spawn (string program, HostSpawnOptions options, Cancellable? cancellable) throws Error, IOError {
-			var server = yield get_remote_server (cancellable);
-			try {
-				return yield server.session.spawn (program, options, cancellable);
-			} catch (GLib.Error e) {
-				throw_dbus_error (e);
+			var server = yield try_get_remote_server (cancellable);
+			if (server != null && (server.flavor != GADGET || program == GADGET_APP_ID)) {
+				try {
+					return yield server.session.spawn (program, options, cancellable);
+				} catch (GLib.Error e) {
+					throw_dbus_error (e);
+				}
 			}
+
+			if (program[0] == '/')
+				throw new Error.NOT_SUPPORTED ("Only able to spawn apps");
+
+			unowned string package = program;
+
+			var aux_options = options.load_aux ();
+
+			string? user_gadget_path = null;
+			if (aux_options.contains ("gadget")) {
+				if (!aux_options.lookup ("gadget", "s", out user_gadget_path)) {
+					throw new Error.INVALID_ARGUMENT (
+						"The 'gadget' option must be a string pointing at the frida-gadget.so to use");
+				}
+			}
+
+			string gadget_path;
+			if (user_gadget_path != null) {
+				gadget_path = user_gadget_path;
+			} else {
+				gadget_path = Path.build_filename (Environment.get_user_cache_dir (), "frida", "gadget-android-arm64.so");
+			}
+
+			InputStream gadget;
+			try {
+				var gadget_file = File.new_for_path (gadget_path);
+				gadget = yield gadget_file.read_async (Priority.DEFAULT, cancellable);
+			} catch (GLib.Error e) {
+				if (e is IOError.NOT_FOUND && user_gadget_path == null) {
+					throw new Error.NOT_SUPPORTED (
+						"Need Gadget to attach on jailed Android; its default location is: %s", gadget_path);
+				} else {
+					throw new Error.NOT_SUPPORTED ("%s", e.message);
+				}
+			}
+
+			var details = yield Droidy.Injector.inject (gadget, package, device_details.serial, cancellable);
+			gadgets[details.pid] = details;
+
+			return details.pid;
 		}
 
 		public async void input (uint pid, uint8[] data, Cancellable? cancellable) throws Error, IOError {
@@ -435,6 +479,12 @@ namespace Frida {
 		}
 
 		public async void resume (uint pid, Cancellable? cancellable) throws Error, IOError {
+			var gadget = gadgets[pid];
+			if (gadget != null) {
+				yield gadget.jdwp.resume (cancellable);
+				return;
+			}
+
 			var server = yield get_remote_server (cancellable);
 			try {
 				yield server.session.resume (pid, cancellable);
@@ -462,11 +512,57 @@ namespace Frida {
 		}
 
 		public async AgentSessionId attach_in_realm (uint pid, Realm realm, Cancellable? cancellable) throws Error, IOError {
+			var gadget = gadgets[pid];
+			if (gadget != null)
+				return yield attach_via_gadget (pid, realm, gadget, cancellable);
+
 			var server = yield get_remote_server (cancellable);
 			try {
 				return yield attach_via_remote (pid, server, cancellable);
 			} catch (Error e) {
 				throw_dbus_error (e);
+			}
+		}
+
+		private async AgentSessionId attach_via_gadget (uint pid, Realm realm, Droidy.Injector.GadgetDetails gadget,
+				Cancellable? cancellable) throws Error, IOError {
+			try {
+				var stream = yield channel_provider.open_channel ("localabstract:" + gadget.unix_socket_path, cancellable);
+
+				var connection = yield new DBusConnection (stream, null, AUTHENTICATION_CLIENT, null, cancellable);
+
+				HostSession host_session = yield connection.get_proxy (null, ObjectPath.HOST_SESSION,
+					DBusProxyFlags.NONE, cancellable);
+
+				AgentSessionId remote_session_id;
+				try {
+					remote_session_id = yield host_session.attach_in_realm (pid, realm, cancellable);
+				} catch (GLib.Error e) {
+					if (e is DBusError.UNKNOWN_METHOD) {
+						if (realm != NATIVE) {
+							throw new Error.INVALID_ARGUMENT (
+								"Local Frida Gadget does not support the “realm” option; please upgrade it");
+						}
+						remote_session_id = yield host_session.attach_to (pid, cancellable);
+					} else {
+						throw e;
+					}
+				}
+
+				AgentSession agent_session = yield connection.get_proxy (null,
+					ObjectPath.from_agent_session_id (remote_session_id), DBusProxyFlags.NONE, cancellable);
+
+				var local_session_id = AgentSessionId (next_agent_session_id++);
+				var agent_entry = new AgentEntry (local_session_id, agent_session, host_session, connection);
+				agent_entry.detached.connect (on_agent_entry_detached);
+				agent_entries[local_session_id] = agent_entry;
+				agent_sessions[local_session_id] = agent_session;
+
+				return local_session_id;
+			} catch (GLib.Error e) {
+				if (e is Error)
+					throw (Error) e;
+				throw new Error.NOT_SUPPORTED ("%s", e.message);
 			}
 		}
 
@@ -531,6 +627,21 @@ namespace Frida {
 			} catch (GLib.Error e) {
 				throw_dbus_error (e);
 			}
+		}
+
+		private void on_agent_entry_detached (AgentEntry entry, SessionDetachReason reason) {
+			var id = AgentSessionId (entry.id);
+			CrashInfo? crash = null;
+
+			agent_entries.unset (id);
+			agent_sessions.unset (id);
+
+			entry.detached.disconnect (on_agent_entry_detached);
+
+			agent_session_closed (id, entry.agent_session, reason, crash);
+			agent_session_destroyed (id, reason);
+
+			entry.close.begin (io_cancellable);
 		}
 
 		private async RemoteServer? try_get_remote_server (Cancellable? cancellable) throws IOError {

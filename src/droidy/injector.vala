@@ -6,13 +6,27 @@ namespace Frida.Droidy.Injector {
 	}
 
 	public class GadgetDetails : Object {
-		public IOStream stream {
+		public uint pid {
 			get;
 			construct;
 		}
 
-		public GadgetDetails (IOStream stream) {
-			Object (stream: stream);
+		public string unix_socket_path {
+			get;
+			construct;
+		}
+
+		public JDWP.Client jdwp {
+			get;
+			construct;
+		}
+
+		public GadgetDetails (uint pid, string unix_socket_path, JDWP.Client jdwp) {
+			Object (
+				pid: pid,
+				unix_socket_path: unix_socket_path,
+				jdwp: jdwp
+			);
 		}
 	}
 
@@ -75,9 +89,7 @@ namespace Frida.Droidy.Injector {
 			so_meta.mode = 0100755;
 			so_meta.time_modified = new DateTime.now_utc ();
 
-			var timer = new Timer ();
 			yield Frida.Droidy.FileSync.send (gadget, so_meta, so_path_shared, device_serial, cancellable);
-			printerr ("Transfer took %u ms\n", (uint) (timer.elapsed () * 1000.0));
 
 			var config = new Json.Builder ();
 			config
@@ -113,7 +125,6 @@ namespace Frida.Droidy.Injector {
 			yield tracker.open (device_serial, cancellable);
 
 			tracker.debugger_attached.connect (pid => {
-				printerr ("Debugger attached! PID=%u\n", pid);
 				target_pid = pid;
 				if (waiting)
 					inject_gadget.callback ();
@@ -142,21 +153,17 @@ namespace Frida.Droidy.Injector {
 			}
 
 			var activity_class = yield jdwp.get_class_by_signature ("Landroid/app/Activity;", cancellable);
-			printerr ("android.app.Activity: %s\n", activity_class.to_string ());
 			var activity_methods = yield jdwp.get_methods (activity_class.ref_type.id, cancellable);
 			foreach (var method in activity_methods) {
 				if (method.name == "onCreate") {
-					printerr ("\t%s\n", method.to_string ());
-					var id = yield jdwp.set_event_request (BREAKPOINT, JDWP.SuspendPolicy.EVENT_THREAD,
+					yield jdwp.set_event_request (BREAKPOINT, JDWP.SuspendPolicy.EVENT_THREAD,
 						new JDWP.EventModifier[] {
 							new JDWP.LocationOnlyModifier (activity_class.ref_type, method.id),
 						});
-					printerr ("\t\tAdded breakpoint with ID: %s\n", id.to_string ());
 				}
 			}
 
 			jdwp.events_received.connect (events => {
-				printerr ("Got events: %s\n", events.to_string ());
 				breakpoint_event = (JDWP.BreakpointEvent) events.items[0];
 				if (waiting)
 					inject_gadget.callback ();
@@ -169,6 +176,8 @@ namespace Frida.Droidy.Injector {
 				yield;
 				waiting = false;
 			}
+
+			yield jdwp.clear_all_breakpoints (cancellable);
 
 			var runtime_class = yield jdwp.get_class_by_signature ("Ljava/lang/Runtime;", cancellable);
 			var runtime_methods = yield jdwp.get_methods (runtime_class.ref_type.id, cancellable);
@@ -216,22 +225,12 @@ namespace Frida.Droidy.Injector {
 
 			var gadget_path = yield jdwp.create_string (so_path_app, cancellable);
 
-			printerr ("Calling Runtime.load(\"%s\")\n", so_path_app);
-			var result = yield jdwp.invoke_instance_method (runtime.val, breakpoint_event.thread,
+			yield jdwp.invoke_instance_method (runtime.val, breakpoint_event.thread,
 				runtime_class.ref_type.id, load_method, new JDWP.Value[] {
 					gadget_path,
 				}, 0, cancellable);
-			printerr ("Runtime.load() result: %s\n", result.to_string ());
 
-			IOStream stream;
-			{
-				var c = yield Frida.Droidy.Client.open (cancellable);
-				yield c.request ("host:transport:" + device_serial, cancellable);
-				yield c.request_protocol_change ("localabstract:" + unix_socket_path, cancellable);
-				stream = c.stream;
-			}
-
-			return new GadgetDetails (stream);
+			return new GadgetDetails (target_pid, unix_socket_path, jdwp);
 		}
 	}
 }

@@ -21,6 +21,8 @@ namespace Frida.JDWP {
 		private State _state = CREATED;
 		private uint32 next_id = 1;
 		private IDSizes id_sizes = new IDSizes.unknown ();
+		private ReferenceTypeID java_lang_object;
+		private MethodID java_lang_object_to_string;
 		private Gee.ArrayQueue<Bytes> pending_writes = new Gee.ArrayQueue<Bytes> ();
 		private Gee.Map<uint32, PendingReply> pending_replies = new Gee.HashMap<uint32, PendingReply> ();
 
@@ -60,6 +62,17 @@ namespace Frida.JDWP {
 			id_sizes = yield get_id_sizes (cancellable);
 
 			change_state (READY);
+
+			var object_class = yield get_class_by_signature ("Ljava/lang/Object;", cancellable);
+			java_lang_object = object_class.ref_type.id;
+
+			var object_methods = yield get_methods (object_class.ref_type.id, cancellable);
+			foreach (var method in object_methods) {
+				if (method.name == "toString") {
+					java_lang_object_to_string = method.id;
+					break;
+				}
+			}
 
 			return true;
 		}
@@ -105,6 +118,15 @@ namespace Frida.JDWP {
 			var reply = yield execute (command, cancellable);
 
 			return new String (reply.read_object_id ());
+		}
+
+		public async string read_string (ObjectID id, Cancellable? cancellable = null) throws Error, IOError {
+			var command = make_command (STRING_REFERENCE, StringReferenceCommand.VALUE);
+			command.append_object_id (id);
+
+			var reply = yield execute (command, cancellable);
+
+			return reply.read_utf8_string ();
 		}
 
 		public async ClassInfo get_class_by_signature (string signature, Cancellable? cancellable = null) throws Error, IOError {
@@ -160,7 +182,7 @@ namespace Frida.JDWP {
 
 			var reply = yield execute (command, cancellable);
 
-			return handle_invoke_reply (reply);
+			return yield handle_invoke_reply (reply, thread, cancellable);
 		}
 
 		public async Value invoke_instance_method (ObjectID object, ThreadID thread, ReferenceTypeID clazz, MethodID method,
@@ -178,14 +200,20 @@ namespace Frida.JDWP {
 
 			var reply = yield execute (command, cancellable);
 
-			return handle_invoke_reply (reply);
+			return yield handle_invoke_reply (reply, thread, cancellable);
 		}
 
-		private Value handle_invoke_reply (PacketReader reply) throws Error {
+		private async Value handle_invoke_reply (PacketReader reply, ThreadID thread, Cancellable? cancellable) throws Error, IOError {
 			var retval = reply.read_value ();
+
 			var exception = reply.read_tagged_object_id ();
-			if (!exception.id.is_null)
-				throw new Error.PROTOCOL ("Exception thrown during method invocation");
+			if (!exception.id.is_null) {
+				String description = (String) yield invoke_instance_method (exception.id, thread,
+					java_lang_object, java_lang_object_to_string, {}, 0, cancellable);
+				string description_str = yield read_string (description.val, cancellable);
+				throw new Error.PROTOCOL ("%s", description_str);
+			}
+
 			return retval;
 		}
 
@@ -2070,6 +2098,7 @@ namespace Frida.JDWP {
 		CLASS_TYPE       = 3,
 		INTERFACE_TYPE   = 5,
 		OBJECT_REFERENCE = 9,
+		STRING_REFERENCE = 10,
 		EVENT_REQUEST    = 15,
 		EVENT            = 64,
 	}
@@ -2096,6 +2125,10 @@ namespace Frida.JDWP {
 
 	private enum ObjectReferenceCommand {
 		INVOKE_METHOD = 6,
+	}
+
+	private enum StringReferenceCommand {
+		VALUE = 1,
 	}
 
 	private enum EventRequestCommand {

@@ -1,4 +1,4 @@
-let ApplicationInfo, ComponentName, ContextWrapper, Intent, RunningAppProcessInfo, RunningTaskInfo, UserHandle, GET_META_DATA, GET_ACTIVITIES, FLAG_ACTIVITY_NEW_TASK;
+let ComponentName, ContextWrapper, Intent, UserHandle, GET_META_DATA, GET_ACTIVITIES, FLAG_ACTIVITY_NEW_TASK;
 let context, packageManager, activityManager, loadAppLabel;
 
 let multiUserSupported;
@@ -7,14 +7,12 @@ const pendingLaunches = new Map();
 function init() {
   const ActivityManager = Java.use('android.app.ActivityManager');
   const ActivityThread = Java.use('android.app.ActivityThread');
-  ApplicationInfo = Java.use('android.content.pm.ApplicationInfo');
+  const ApplicationInfo = Java.use('android.content.pm.ApplicationInfo');
   ComponentName = Java.use('android.content.ComponentName');
   ContextWrapper = Java.use('android.content.ContextWrapper');
   Intent = Java.use('android.content.Intent');
   const Context = Java.use('android.content.Context');
   const PackageManager = Java.use('android.content.pm.PackageManager');
-  RunningAppProcessInfo = Java.use('android.app.ActivityManager$RunningAppProcessInfo');
-  RunningTaskInfo = Java.use('android.app.ActivityManager$RunningTaskInfo');
   UserHandle = Java.use('android.os.UserHandle');
   const ACTIVITY_SERVICE = Context.ACTIVITY_SERVICE.value;
   GET_META_DATA = PackageManager.GET_META_DATA.value;
@@ -42,7 +40,7 @@ rpc.exports = {
       const processes = activityManager.getRunningAppProcesses();
       const numProcesses = processes.size();
       for (let i = 0; i !== numProcesses; i++) {
-        const process = Java.cast(processes.get(i), RunningAppProcessInfo);
+        const process = processes.get(i);
         const pid = process.pid.value;
 
         const importance = process.importance.value;
@@ -60,7 +58,7 @@ rpc.exports = {
       const apps = packageManager.getInstalledApplications(GET_META_DATA);
       const numApps = apps.size();
       for (let i = 0; i !== numApps; i++) {
-        const app = Java.cast(apps.get(i), ApplicationInfo);
+        const app = apps.get(i);
         const pkg = app.packageName.value;
 
         const name = loadAppLabel.call(app, packageManager).toString();
@@ -112,7 +110,7 @@ rpc.exports = {
           : pm.getInstalledApplications(GET_META_DATA);
       const numApps = apps.size();
       for (let i = 0; i !== numApps; i++) {
-        const appInfo = Java.cast(apps.get(i), ApplicationInfo);
+        const appInfo = apps.get(i);
         if (appInfo.packageName.value === pkg) {
           appInstalled = true;
           break;
@@ -183,7 +181,7 @@ rpc.exports = {
 
       const numProcesses = processes.size();
       for (let i = 0; i !== numProcesses; i++) {
-        const process = Java.cast(processes.get(i), RunningAppProcessInfo);
+        const process = processes.get(i);
         if (process.pid.value === pid) {
           for (const pkg of process.pkgList.value) {
             activityManager.forceStopPackage(pkg);
@@ -201,7 +199,7 @@ rpc.exports = {
 
       const runningTaskInfos = activityManager.getRunningTasks(1);
       if (runningTaskInfos !== null && runningTaskInfos.size() > 0) {
-        const runningTaskInfo = Java.cast(runningTaskInfos.get(0), RunningTaskInfo);
+        const runningTaskInfo = runningTaskInfos.get(0);
         if (runningTaskInfo.topActivity !== undefined) {
           const topActivity = runningTaskInfo.topActivity.value;
           const app = packageManager.getApplicationInfo(topActivity.getPackageName(), GET_META_DATA);
@@ -212,7 +210,7 @@ rpc.exports = {
           const numProcesses = processes.size();
           let pid = 0;
           for (let i = 0; i !== numProcesses; i++) {
-            const process = Java.cast(processes.get(i), RunningAppProcessInfo);
+            const process = processes.get(i);
             if (process.pkgList.value.includes(pkg)) {
               pid = process.pid.value;
               break;

@@ -32,6 +32,37 @@ function init() {
 }
 
 rpc.exports = {
+  getFrontmostApplication() {
+    return performOnJavaVM(() => {
+      let result = null;
+
+      const runningTaskInfos = activityManager.getRunningTasks(1);
+      if (runningTaskInfos !== null && runningTaskInfos.size() > 0) {
+        const runningTaskInfo = runningTaskInfos.get(0);
+        if (runningTaskInfo.topActivity !== undefined) {
+          const topActivity = runningTaskInfo.topActivity.value;
+          const app = packageManager.getApplicationInfo(topActivity.getPackageName(), GET_META_DATA);
+          const pkg = app.packageName.value;
+          const name = app.loadLabel(packageManager).toString();
+
+          const processes = activityManager.getRunningAppProcesses();
+          const numProcesses = processes.size();
+          let pid = 0;
+          for (let i = 0; i !== numProcesses; i++) {
+            const process = processes.get(i);
+            if (process.pkgList.value.includes(pkg)) {
+              pid = process.pid.value;
+              break;
+            }
+          }
+
+          result = [pkg, name, pid];
+        }
+      }
+
+      return result;
+    });
+  },
   enumerateApplications() {
     return performOnJavaVM(() => {
       const result = [];
@@ -193,37 +224,6 @@ rpc.exports = {
       return false;
     });
   },
-  getFrontmostApplication() {
-    return performOnJavaVM(() => {
-      let result = null;
-
-      const runningTaskInfos = activityManager.getRunningTasks(1);
-      if (runningTaskInfos !== null && runningTaskInfos.size() > 0) {
-        const runningTaskInfo = runningTaskInfos.get(0);
-        if (runningTaskInfo.topActivity !== undefined) {
-          const topActivity = runningTaskInfo.topActivity.value;
-          const app = packageManager.getApplicationInfo(topActivity.getPackageName(), GET_META_DATA);
-          const pkg = app.packageName.value;
-          const name = app.loadLabel(packageManager).toString();
-
-          const processes = activityManager.getRunningAppProcesses();
-          const numProcesses = processes.size();
-          let pid = 0;
-          for (let i = 0; i !== numProcesses; i++) {
-            const process = processes.get(i);
-            if (process.pkgList.value.includes(pkg)) {
-              pid = process.pid.value;
-              break;
-            }
-          }
-
-          result = [pkg, name, pid];
-        }
-      }
-
-      return result;
-    });
-  }
 };
 
 function getAppMetaData(pkg, uid) {
